@@ -1,0 +1,381 @@
+package com.niel.jarvis
+
+import android.Manifest
+import android.app.Activity
+import android.app.AlertDialog
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.provider.ContactsContract
+import android.speech.RecognizerIntent
+import android.speech.tts.TextToSpeech
+import android.telephony.SmsManager
+import android.view.Gravity
+import android.view.View
+import android.view.inputmethod.EditorInfo
+import android.widget.Button
+import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
+import android.widget.Toast
+import org.json.JSONArray
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.Locale
+import kotlin.concurrent.thread
+
+class MainActivity : Activity(), TextToSpeech.OnInitListener {
+
+    private lateinit var tts: TextToSpeech
+    private lateinit var logBox: LinearLayout
+    private lateinit var scroll: ScrollView
+    private lateinit var input: EditText
+    private val ui = Handler(Looper.getMainLooper())
+    private val history = JSONArray()
+    private var model: String? = null
+    private var busy = false
+    private val prefs by lazy { getSharedPreferences("jarvis", Context.MODE_PRIVATE) }
+
+    private val persona = "You are Jarvis, a witty, concise, polite AI butler-style voice assistant " +
+        "running on the user's Android phone. Reply in 1 to 3 short spoken-friendly sentences, " +
+        "no markdown or lists. Use your tools when relevant: opening apps, calling and texting " +
+        "contacts, timers, and the time. Address the user as sir only occasionally."
+
+    private fun px(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        tts = TextToSpeech(this, this)
+
+        val root = LinearLayout(this)
+        root.orientation = LinearLayout.VERTICAL
+        root.setBackgroundColor(0xFF060D16.toInt())
+        root.setPadding(px(12), px(12), px(12), px(12))
+        root.fitsSystemWindows = true
+
+        val title = TextView(this)
+        title.text = "J A R V I S"
+        title.setTextColor(0xFF27C4FF.toInt())
+        title.textSize = 16f
+        title.gravity = Gravity.CENTER
+        title.typeface = Typeface.DEFAULT_BOLD
+        root.addView(title, LinearLayout.LayoutParams(-1, -2))
+
+        scroll = ScrollView(this)
+        logBox = LinearLayout(this)
+        logBox.orientation = LinearLayout.VERTICAL
+        scroll.addView(logBox, FrameLayout.LayoutParams(-1, -2))
+        root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+
+        val mic = Button(this)
+        mic.text = "Tap to talk"
+        mic.setOnClickListener { listen() }
+        root.addView(mic, LinearLayout.LayoutParams(-1, px(64)))
+
+        val row = LinearLayout(this)
+        row.orientation = LinearLayout.HORIZONTAL
+        input = EditText(this)
+        input.hint = "Or type here"
+        input.setTextColor(Color.WHITE)
+        input.setHintTextColor(Color.GRAY)
+        input.setSingleLine(true)
+        input.imeOptions = EditorInfo.IME_ACTION_SEND
+        input.setOnEditorActionListener { _, a, _ ->
+            if (a == EditorInfo.IME_ACTION_SEND) { send(); true } else false
+        }
+        row.addView(input, LinearLayout.LayoutParams(0, -2, 1f))
+        val keyBtn = Button(this)
+        keyBtn.text = "Key"
+        keyBtn.setOnClickListener { promptKey(null) }
+        row.addView(keyBtn, LinearLayout.LayoutParams(-2, -2))
+        root.addView(row, LinearLayout.LayoutParams(-1, -2))
+
+        setContentView(root)
+        requestPermissions(
+            arrayOf(
+                Manifest.permission.READ_CONTACTS,
+                Manifest.permission.CALL_PHONE,
+                Manifest.permission.SEND_SMS
+            ), 2
+        )
+        addMsg("Good day. How may I help?", false)
+    }
+
+    override fun onInit(status: Int) {
+        if (status == TextToSpeech.SUCCESS) tts.language = Locale.getDefault()
+    }
+
+    override fun onDestroy() {
+        tts.shutdown()
+        super.onDestroy()
+    }
+
+    private fun speak(t: String) {
+        tts.speak(t, TextToSpeech.QUEUE_FLUSH, null, "jarvis")
+    }
+
+    private fun addMsg(text: String, me: Boolean): TextView {
+        val tv = TextView(this)
+        tv.text = text
+        tv.textSize = 16f
+        tv.setTextColor(0xFFDFF3FF.toInt())
+        tv.setPadding(px(12), px(8), px(12), px(8))
+        tv.maxWidth = (resources.displayMetrics.widthPixels * 0.85).toInt()
+        val bg = GradientDrawable()
+        bg.cornerRadius = px(14).toFloat()
+        bg.setColor(if (me) 0xFF12324A.toInt() else 0xFF0F1D2C.toInt())
+        tv.background = bg
+        val lp = LinearLayout.LayoutParams(-2, -2)
+        lp.gravity = if (me) Gravity.END else Gravity.START
+        lp.setMargins(0, px(5), 0, px(5))
+        logBox.addView(tv, lp)
+        scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
+        return tv
+    }
+
+    private fun send() {
+        val t = input.text.toString().trim()
+        if (t.isNotEmpty()) {
+            input.setText("")
+            ask(t)
+        }
+    }
+
+    private fun listen() {
+        val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+        i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+        i.putExtra(RecognizerIntent.EXTRA_PROMPT, "Listening")
+        try {
+            startActivityForResult(i, 1)
+        } catch (e: Exception) {
+            Toast.makeText(this, "Voice input is not available. Type instead.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == 1 && resultCode == RESULT_OK) {
+            val said = data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
+            if (!said.isNullOrBlank()) ask(said)
+        }
+    }
+
+    private fun promptKey(after: (() -> Unit)?) {
+        val et = EditText(this)
+        et.hint = "gsk_..."
+        et.setSingleLine(true)
+        AlertDialog.Builder(this)
+            .setTitle("Groq API key")
+            .setMessage("Stored only on this phone.")
+            .setView(et)
+            .setPositiveButton("Save") { _, _ ->
+                val k = et.text.toString().trim()
+                if (k.isNotEmpty()) {
+                    prefs.edit().putString("key", k).apply()
+                    model = null
+                    after?.invoke()
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun ask(q: String) {
+        if (busy) return
+        val key = prefs.getString("key", "") ?: ""
+        if (key.isEmpty()) {
+            promptKey { ask(q) }
+            return
+        }
+        busy = true
+        addMsg(q, true)
+        history.put(JSONObject().put("role", "user").put("content", q))
+        val bubble = addMsg("...", false)
+        thread {
+            try {
+                val reply = runChat(key)
+                ui.post { bubble.text = reply; speak(reply); busy = false }
+            } catch (e: Exception) {
+                if (history.length() > 0) history.remove(history.length() - 1)
+                ui.post {
+                    bubble.text = "Sorry, that failed: ${e.message}"
+                    busy = false
+                }
+            }
+        }
+    }
+
+    private fun http(url: String, key: String, body: String?): String {
+        val c = URL(url).openConnection() as HttpURLConnection
+        c.requestMethod = if (body == null) "GET" else "POST"
+        c.setRequestProperty("Authorization", "Bearer $key")
+        c.setRequestProperty("Content-Type", "application/json")
+        c.connectTimeout = 20000
+        c.readTimeout = 60000
+        if (body != null) {
+            c.doOutput = true
+            c.outputStream.use { it.write(body.toByteArray()) }
+        }
+        val code = c.responseCode
+        val stream = if (code in 200..299) c.inputStream else c.errorStream
+        val text = stream?.bufferedReader()?.use { it.readText() } ?: ""
+        if (code !in 200..299) throw Exception("$code ${text.take(150)}")
+        return text
+    }
+
+    private fun pickModel(key: String): String {
+        val data = JSONObject(http("https://api.groq.com/openai/v1/models", key, null)).getJSONArray("data")
+        val ids = ArrayList<String>()
+        for (i in 0 until data.length()) ids.add(data.getJSONObject(i).getString("id"))
+        for (p in listOf("openai/gpt-oss-120b", "openai/gpt-oss-20b", "llama-3.3-70b-versatile", "llama-3.1-8b-instant")) {
+            if (ids.contains(p)) return p
+        }
+        val bad = Regex("whisper|guard|tts|orpheus|playai|compound|embed|safeguard|distil", RegexOption.IGNORE_CASE)
+        return ids.firstOrNull { !bad.containsMatchIn(it) } ?: throw Exception("no chat models available")
+    }
+
+    private fun tool(name: String, desc: String, vararg params: String): JSONObject {
+        val props = JSONObject()
+        val req = JSONArray()
+        for (p in params) {
+            props.put(p, JSONObject().put("type", if (p == "seconds") "number" else "string"))
+            req.put(p)
+        }
+        val fn = JSONObject()
+            .put("name", name)
+            .put("description", desc)
+            .put("parameters", JSONObject().put("type", "object").put("properties", props).put("required", req))
+        return JSONObject().put("type", "function").put("function", fn)
+    }
+
+    private fun toolDefs(): JSONArray {
+        val a = JSONArray()
+        a.put(tool("get_time", "Get the current local date and time."))
+        a.put(tool("set_timer", "Start a countdown timer. The app announces when it ends.", "seconds"))
+        a.put(tool("open_app", "Open an installed app on this phone by its name, for example Spotify.", "app"))
+        a.put(tool("call_contact", "Call a person from the phone contacts by name, or a phone number.", "name"))
+        a.put(tool("send_text", "Send an SMS text message to a contact by name, or a phone number.", "name", "message"))
+        return a
+    }
+
+    private fun runChat(key: String): String {
+        if (model == null) model = pickModel(key)
+        val msgs = JSONArray(history.toString())
+        for (round in 0 until 5) {
+            val all = JSONArray()
+            all.put(JSONObject().put("role", "system").put("content", persona))
+            for (k in 0 until msgs.length()) all.put(msgs.get(k))
+            val body = JSONObject()
+                .put("model", model)
+                .put("max_tokens", 500)
+                .put("tools", toolDefs())
+                .put("messages", all)
+            val resp = http("https://api.groq.com/openai/v1/chat/completions", key, body.toString())
+            val m = JSONObject(resp).getJSONArray("choices").getJSONObject(0).getJSONObject("message")
+            val content = if (m.isNull("content")) "" else m.getString("content").trim()
+            val calls = m.optJSONArray("tool_calls")
+            if (calls == null || calls.length() == 0) {
+                val out = if (content.isEmpty()) "Apologies, I have nothing to say." else content
+                history.put(JSONObject().put("role", "assistant").put("content", out))
+                return out
+            }
+            msgs.put(JSONObject().put("role", "assistant").put("content", content).put("tool_calls", calls))
+            for (c in 0 until calls.length()) {
+                val call = calls.getJSONObject(c)
+                val fn = call.getJSONObject("function")
+                val args = try { JSONObject(fn.optString("arguments", "{}")) } catch (e: Exception) { JSONObject() }
+                val result = try { runTool(fn.getString("name"), args) } catch (e: Exception) { "Error: ${e.message}" }
+                msgs.put(
+                    JSONObject().put("role", "tool")
+                        .put("tool_call_id", call.getString("id"))
+                        .put("content", result)
+                )
+            }
+        }
+        return "Sorry, I got stuck on that one."
+    }
+
+    private fun runTool(name: String, args: JSONObject): String {
+        return when (name) {
+            "get_time" -> java.text.DateFormat.getDateTimeInstance().format(java.util.Date())
+            "set_timer" -> {
+                val s = args.optDouble("seconds", 0.0).toLong().coerceIn(1L, 86400L)
+                ui.postDelayed({
+                    val m = "Timer done."
+                    addMsg(m, false)
+                    speak(m)
+                }, s * 1000)
+                "Timer set for $s seconds."
+            }
+            "open_app" -> openApp(args.optString("app", ""))
+            "call_contact" -> callContact(args.optString("name", ""))
+            "send_text" -> sendText(args.optString("name", ""), args.optString("message", ""))
+            else -> "Unknown tool."
+        }
+    }
+
+    private fun norm(s: String) = s.lowercase().replace(Regex("[^a-z0-9]"), "")
+
+    private fun openApp(name: String): String {
+        val q = norm(name)
+        if (q.isEmpty()) return "Which app?"
+        val pm = packageManager
+        val main = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        val apps = pm.queryIntentActivities(main, 0)
+        val match = apps.firstOrNull { norm(it.loadLabel(pm).toString()) == q }
+            ?: apps.firstOrNull { norm(it.loadLabel(pm).toString()).contains(q) }
+            ?: return "I could not find an app called $name."
+        val launch = pm.getLaunchIntentForPackage(match.activityInfo.packageName)
+            ?: return "I cannot open that app."
+        launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        startActivity(launch)
+        return "Opening ${match.loadLabel(pm)}."
+    }
+
+    private fun findNumber(name: String): String? {
+        if (Regex("^[+0-9 ()-]{5,}$").matches(name.trim())) return name.replace(" ", "")
+        if (checkSelfPermission(Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) return null
+        val c = contentResolver.query(
+            ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+            arrayOf(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME, ContactsContract.CommonDataKinds.Phone.NUMBER),
+            ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " LIKE ?",
+            arrayOf("%$name%"),
+            null
+        )
+        c?.use { if (it.moveToFirst()) return it.getString(1) }
+        return null
+    }
+
+    private fun callContact(name: String): String {
+        if (checkSelfPermission(Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED)
+            return "I need phone permission. Please allow it in settings and ask again."
+        val num = findNumber(name) ?: return "I could not find a number for $name. Check contacts permission."
+        val i = Intent(Intent.ACTION_CALL, Uri.parse("tel:" + Uri.encode(num)))
+        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        startActivity(i)
+        return "Calling $name."
+    }
+
+    private fun sendText(name: String, message: String): String {
+        if (message.isBlank()) return "What should the message say?"
+        if (checkSelfPermission(Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED)
+            return "I need SMS permission. Please allow it in settings and ask again."
+        val num = findNumber(name) ?: return "I could not find a number for $name. Check contacts permission."
+        @Suppress("DEPRECATION")
+        val sms = if (Build.VERSION.SDK_INT >= 31) getSystemService(SmsManager::class.java) else SmsManager.getDefault()
+        sms.sendMultipartTextMessage(num, null, sms.divideMessage(message), null, null)
+        return "Text sent to $name."
+    }
+}
