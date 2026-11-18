@@ -47,4 +47,4 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private var busy = false
     private val prefs by lazy { getSharedPreferences("jarvis", Context.MODE_PRIVATE) }
 
-    private val persona = "You are Jarvis, a witty, concise, polite AI butler-
+        private val persona = "You are Jarvis, a witty and polite butler style voice assistant on an Android phone. Reply in one to three short spoken sentences with no markdown. Use your tools when relevant for opening apps, calling, texting, timers and the time."
