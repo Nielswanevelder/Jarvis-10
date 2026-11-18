@@ -378,4 +378,4 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         sms.sendMultipartTextMessage(num, null, sms.divideMessage(message), null, null)
         return "Text sent to $name."
     }
-}
+} 
