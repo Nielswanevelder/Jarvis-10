@@ -20,11 +20,15 @@ import android.os.Looper
 import android.provider.ContactsContract
 import android.provider.Settings
 import android.service.notification.StatusBarNotification
+import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.telephony.SmsManager
 import android.view.Gravity
 import android.view.View
+import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.widget.Button
 import android.widget.EditText
@@ -50,6 +54,12 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private val history = JSONArray()
     private var model: String? = null
     private var busy = false
+    private var recognizer: SpeechRecognizer? = null
+    private var alwaysOn = false
+    private var speaking = false
+    private var awaitingCommand = false
+    private var listeningActive = false
+    private lateinit var alwaysBtn: Button
     private val prefs by lazy { getSharedPreferences("jarvis", Context.MODE_PRIVATE) }
 
     private val persona = "You are Jarvis, a polite British butler style assistant. Reply in one to three short sentences. Use your tools to open apps, call, text, send WhatsApp messages and set timers."
@@ -84,6 +94,12 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         mic.text = "Tap to talk"
         mic.setOnClickListener { listen() }
         root.addView(mic, LinearLayout.LayoutParams(-1, px(64)))
+
+        alwaysOn = prefs.getBoolean("always", false)
+        alwaysBtn = Button(this)
+        alwaysBtn.text = if (alwaysOn) "Always listening: ON (say Jarvis)" else "Always listening: OFF"
+        alwaysBtn.setOnClickListener { setAlways(!alwaysOn) }
+        root.addView(alwaysBtn, LinearLayout.LayoutParams(-1, -2))
 
         val row = LinearLayout(this)
         row.orientation = LinearLayout.HORIZONTAL
@@ -126,16 +142,30 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         if (pick != null) tts.voice = pick
         tts.setPitch(0.8f)
         tts.setSpeechRate(0.95f)
+        tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+            override fun onStart(utteranceId: String?) {}
+            override fun onDone(utteranceId: String?) {
+                ui.post { doneSpeaking() }
+            }
+            @Deprecated("Deprecated in Java")
+            override fun onError(utteranceId: String?) {
+                ui.post { doneSpeaking() }
+            }
+        })
         ui.postDelayed({ readNotifications() }, 800)
     }
 
     override fun onDestroy() {
+        stopAlways()
         tts.shutdown()
         super.onDestroy()
     }
 
     private fun speak(t: String) {
-        tts.speak(t, TextToSpeech.QUEUE_FLUSH, null, "jarvis")
+        ui.post {
+            pauseListening()
+            tts.speak(t, TextToSpeech.QUEUE_FLUSH, null, "jarvis")
+        }
     }
 
     private fun addMsg(text: String, me: Boolean): TextView {
@@ -225,6 +255,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 ui.post {
                     bubble.text = "Sorry, that failed: ${e.message}"
                     busy = false
+                    startAlways()
                 }
             }
         }
@@ -474,10 +505,12 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     override fun onResume() {
         super.onResume()
         NotifService.listener = { sbn -> ui.post { announce(sbn) } }
+        if (alwaysOn) ui.postDelayed({ startAlways() }, 500)
     }
 
     override fun onPause() {
         NotifService.listener = null
+        if (alwaysOn) stopAlways()
         super.onPause()
     }
 
@@ -496,6 +529,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         if (seen[n.key] == line) return
         seen[n.key] = line
         addMsg(line, false)
+        pauseListening()
         tts.speak(line, TextToSpeech.QUEUE_ADD, null, "n" + System.nanoTime())
     }
 
@@ -553,5 +587,136 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             else -> "mixed"
         }
         return "It is $t degrees Celsius and $sky in " + placeName(loc) + "."
+    }
+
+    private fun pauseListening() {
+        speaking = true
+        recognizer?.cancel()
+        listeningActive = false
+    }
+
+    private fun doneSpeaking() {
+        if (tts.isSpeaking) return
+        speaking = false
+        if (alwaysOn) ui.postDelayed({ startAlways() }, 500)
+    }
+
+    private fun setAlways(on: Boolean) {
+        alwaysOn = on
+        prefs.edit().putBoolean("always", on).apply()
+        alwaysBtn.text = if (on) "Always listening: ON (say Jarvis)" else "Always listening: OFF"
+        if (on) {
+            if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 3)
+                return
+            }
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            startAlways()
+        } else {
+            stopAlways()
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 3) {
+            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED && alwaysOn) {
+                window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                startAlways()
+            } else {
+                alwaysOn = false
+                alwaysBtn.text = "Always listening: OFF"
+            }
+        }
+    }
+
+    private fun stopAlways() {
+        recognizer?.cancel()
+        recognizer?.destroy()
+        recognizer = null
+        listeningActive = false
+        awaitingCommand = false
+    }
+
+    private fun restartSoon(ms: Long) {
+        listeningActive = false
+        ui.postDelayed({ startAlways() }, ms)
+    }
+
+    private fun startAlways() {
+        if (!alwaysOn || speaking || busy || listeningActive) return
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            Toast.makeText(this, "Speech recognition is not available on this phone.", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (recognizer == null) {
+            val r = SpeechRecognizer.createSpeechRecognizer(this)
+            r.setRecognitionListener(object : RecognitionListener {
+                override fun onReadyForSpeech(params: Bundle?) {}
+                override fun onBeginningOfSpeech() {}
+                override fun onRmsChanged(rmsdB: Float) {}
+                override fun onBufferReceived(buffer: ByteArray?) {}
+                override fun onEndOfSpeech() {}
+                override fun onPartialResults(partialResults: Bundle?) {}
+                override fun onEvent(eventType: Int, params: Bundle?) {}
+                override fun onError(error: Int) {
+                    when (error) {
+                        SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> {
+                            recognizer?.cancel()
+                            restartSoon(1000)
+                        }
+                        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> {
+                            alwaysOn = false
+                            alwaysBtn.text = "Always listening: OFF"
+                        }
+                        SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> restartSoon(300)
+                        else -> restartSoon(1500)
+                    }
+                }
+                override fun onResults(results: Bundle?) {
+                    listeningActive = false
+                    val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull() ?: ""
+                    handleHeard(text)
+                    restartSoon(400)
+                }
+            })
+            recognizer = r
+        }
+        val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+        i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+        i.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
+        listeningActive = true
+        recognizer?.startListening(i)
+    }
+
+    private fun reply(t: String) {
+        addMsg(t, false)
+        speak(t)
+    }
+
+    private fun handleHeard(text: String) {
+        val t = text.lowercase().trim()
+        if (t.isEmpty()) return
+        if (awaitingCommand) {
+            awaitingCommand = false
+            ask(text)
+            return
+        }
+        val idx = t.indexOf("jarvis")
+        if (idx < 0) return
+        if (t.contains("daddy") && t.contains("home")) {
+            val n = notificationSummary()
+            reply("Welcome home, sir. All systems are online. " + n)
+            return
+        }
+        val cmd = t.substring(idx + 6).trim()
+        if (cmd.isEmpty()) {
+            awaitingCommand = true
+            reply("Yes, sir?")
+        } else {
+            ask(cmd)
+        }
     }
 }
