@@ -60,6 +60,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private var awaitingCommand = false
     private var listeningActive = false
     private lateinit var alwaysBtn: Button
+    private lateinit var bgBtn: Button
     private val prefs by lazy { getSharedPreferences("jarvis", Context.MODE_PRIVATE) }
 
     private val persona = "You are Jarvis, a polite British butler style assistant. Reply in one to three short sentences. Use your tools to open apps, call, text, send WhatsApp messages and set timers."
@@ -100,6 +101,11 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         alwaysBtn.text = if (alwaysOn) "Always listening: ON (say Jarvis)" else "Always listening: OFF"
         alwaysBtn.setOnClickListener { setAlways(!alwaysOn) }
         root.addView(alwaysBtn, LinearLayout.LayoutParams(-1, -2))
+
+        bgBtn = Button(this)
+        bgBtn.text = if (prefs.getBoolean("bg", false)) "Background mode: ON" else "Background mode: OFF"
+        bgBtn.setOnClickListener { setBackground(!prefs.getBoolean("bg", false)) }
+        root.addView(bgBtn, LinearLayout.LayoutParams(-1, -2))
 
         val row = LinearLayout(this)
         row.orientation = LinearLayout.HORIZONTAL
@@ -606,6 +612,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         prefs.edit().putBoolean("always", on).apply()
         alwaysBtn.text = if (on) "Always listening: ON (say Jarvis)" else "Always listening: OFF"
         if (on) {
+            if (prefs.getBoolean("bg", false)) setBackground(false)
             if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
                 requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 3)
                 return
@@ -620,6 +627,11 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 4) {
+            if (grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
+                setBackground(true)
+            }
+        }
         if (requestCode == 3) {
             if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED && alwaysOn) {
                 window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -718,5 +730,42 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         } else {
             ask(cmd)
         }
+    }
+
+    private fun setBackground(on: Boolean) {
+        if (!on) {
+            stopService(Intent(this, ListenService::class.java))
+            prefs.edit().putBoolean("bg", false).apply()
+            bgBtn.text = "Background mode: OFF"
+            return
+        }
+        if (alwaysOn) setAlways(false)
+        val need = ArrayList<String>()
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            need.add(Manifest.permission.RECORD_AUDIO)
+        }
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED
+        ) {
+            need.add("android.permission.POST_NOTIFICATIONS")
+        }
+        if (need.isNotEmpty()) {
+            requestPermissions(need.toTypedArray(), 4)
+            return
+        }
+        if (!Settings.canDrawOverlays(this)) {
+            AlertDialog.Builder(this)
+                .setTitle("Display over other apps")
+                .setMessage("Turn this on for Jarvis so it can open apps from the background. Then come back and tap Background mode again.")
+                .setPositiveButton("Open settings") { _, _ ->
+                    startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + packageName)))
+                }
+                .setNegativeButton("Not now", null)
+                .show()
+            return
+        }
+        startForegroundService(Intent(this, ListenService::class.java))
+        prefs.edit().putBoolean("bg", true).apply()
+        bgBtn.text = "Background mode: ON"
     }
 }
