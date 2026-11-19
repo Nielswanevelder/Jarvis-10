@@ -16,6 +16,7 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.ContactsContract
 import android.provider.Settings
+import android.service.notification.StatusBarNotification
 import android.speech.RecognizerIntent
 import android.speech.tts.TextToSpeech
 import android.telephony.SmsManager
@@ -457,5 +458,35 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         if (t.isEmpty()) return
         addMsg(t, false)
         speak(t)
+    }
+
+    private val seen = HashMap<String, String>()
+
+    override fun onResume() {
+        super.onResume()
+        NotifService.listener = { sbn -> ui.post { announce(sbn) } }
+    }
+
+    override fun onPause() {
+        NotifService.listener = null
+        super.onPause()
+    }
+
+    private fun announce(n: StatusBarNotification) {
+        if (n.isOngoing || n.packageName == packageName) return
+        if ((n.notification.flags and android.app.Notification.FLAG_GROUP_SUMMARY) != 0) return
+        val ex = n.notification.extras
+        val app = try {
+            packageManager.getApplicationLabel(packageManager.getApplicationInfo(n.packageName, 0)).toString()
+        } catch (e: Exception) {
+            n.packageName
+        }
+        val title = ex.getCharSequence("android.title")?.toString() ?: ""
+        val text = (ex.getCharSequence("android.text")?.toString() ?: "").take(100)
+        val line = "$app. $title. $text."
+        if (seen[n.key] == line) return
+        seen[n.key] = line
+        addMsg(line, false)
+        tts.speak(line, TextToSpeech.QUEUE_ADD, null, "n" + System.nanoTime())
     }
 }
