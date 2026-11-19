@@ -1,3 +1,4 @@
+
 package com.niel.jarvis
 
 import android.Manifest
@@ -47,7 +48,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private var busy = false
     private val prefs by lazy { getSharedPreferences("jarvis", Context.MODE_PRIVATE) }
 
-    private val persona = "You are Jarvis, a polite British butler style assistant. Reply in one to three short sentences. Use your tools to open apps, call, text and set timers."
+    private val persona = "You are Jarvis, a polite British butler style assistant. Reply in one to three short sentences. Use your tools to open apps, call, text, send WhatsApp messages and set timers."
 
     private fun px(v: Int) = (v * resources.displayMetrics.density).toInt()
 
@@ -271,6 +272,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         a.put(tool("open_app", "Open an installed app on this phone by its name, for example Spotify.", "app"))
         a.put(tool("call_contact", "Call a person from the phone contacts by name, or a phone number.", "name"))
         a.put(tool("send_text", "Send an SMS text message to a contact by name, or a phone number.", "name", "message"))
+        a.put(tool("whatsapp_message", "Open a WhatsApp chat with a contact and prepare a message. The user taps send.", "name", "message"))
         return a
     }
 
@@ -326,6 +328,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             "open_app" -> openApp(args.optString("app", ""))
             "call_contact" -> callContact(args.optString("name", ""))
             "send_text" -> sendText(args.optString("name", ""), args.optString("message", ""))
+            "whatsapp_message" -> whatsappMessage(args.optString("name", ""), args.optString("message", ""))
             else -> "Unknown tool."
         }
     }
@@ -381,5 +384,29 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         val sms = if (Build.VERSION.SDK_INT >= 31) getSystemService(SmsManager::class.java) else SmsManager.getDefault()
         sms.sendMultipartTextMessage(num, null, sms.divideMessage(message), null, null)
         return "Text sent to $name."
+    }
+
+    private fun waNumber(raw: String): String {
+        val tm = getSystemService(Context.TELEPHONY_SERVICE) as android.telephony.TelephonyManager
+        var iso = tm.networkCountryIso.uppercase()
+        if (iso.isEmpty()) iso = Locale.getDefault().country
+        val e164 = android.telephony.PhoneNumberUtils.formatNumberToE164(raw, iso)
+        return (e164 ?: raw).filter { it.isDigit() }
+    }
+
+    private fun whatsappMessage(name: String, message: String): String {
+        if (message.isBlank()) return "What should the message say?"
+        val raw = findNumber(name) ?: return "I could not find a number for $name. Check contacts permission."
+        val url = "https://wa.me/" + waNumber(raw) + "?text=" + Uri.encode(message)
+        val i = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        i.setPackage("com.whatsapp")
+        try {
+            startActivity(i)
+        } catch (e: Exception) {
+            i.setPackage(null)
+            startActivity(i)
+        }
+        return "WhatsApp is ready for $name. Tap send."
     }
 }
