@@ -9,6 +9,9 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.location.Geocoder
+import android.location.Location
+import android.location.LocationManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -105,7 +108,9 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             arrayOf(
                 Manifest.permission.READ_CONTACTS,
                 Manifest.permission.CALL_PHONE,
-                Manifest.permission.SEND_SMS
+                Manifest.permission.SEND_SMS,
+                Manifest.permission.ACCESS_COARSE_LOCATION,
+                Manifest.permission.ACCESS_FINE_LOCATION
             ), 2
         )
         askNotificationAccess()
@@ -275,6 +280,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         a.put(tool("open_app", "Open an installed app on this phone by its name, for example Spotify.", "app"))
         a.put(tool("call_contact", "Call a person from the phone contacts by name, or a phone number.", "name"))
         a.put(tool("send_text", "Send an SMS text message to a contact by name, or a phone number.", "name", "message"))
+        a.put(tool("get_weather", "Get the current temperature and weather where the user is."))
+        a.put(tool("get_location", "Get the town or city where the user currently is."))
         a.put(tool("read_notifications", "Read out the notifications currently on the phone."))
         a.put(tool("whatsapp_message", "Open a WhatsApp chat with a contact and prepare a message. The user taps send.", "name", "message"))
         return a
@@ -332,6 +339,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             "open_app" -> openApp(args.optString("app", ""))
             "call_contact" -> callContact(args.optString("name", ""))
             "send_text" -> sendText(args.optString("name", ""), args.optString("message", ""))
+            "get_weather" -> weather()
+            "get_location" -> locationText()
             "read_notifications" -> notificationSummary().ifEmpty { "Notification access is off. Turn it on in settings." }
             "whatsapp_message" -> whatsappMessage(args.optString("name", ""), args.optString("message", ""))
             else -> "Unknown tool."
@@ -488,5 +497,61 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         seen[n.key] = line
         addMsg(line, false)
         tts.speak(line, TextToSpeech.QUEUE_ADD, null, "n" + System.nanoTime())
+    }
+
+    private fun currentLocation(): Location? {
+        val coarse = checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        val fine = checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        if (!coarse && !fine) return null
+        val lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        var best: Location? = null
+        for (p in lm.getProviders(true)) {
+            val l = try { lm.getLastKnownLocation(p) } catch (e: SecurityException) { null }
+            if (l != null && (best == null || l.time > best.time)) best = l
+        }
+        return best
+    }
+
+    private fun placeName(loc: Location): String {
+        return try {
+            if (!Geocoder.isPresent()) return "your area"
+            @Suppress("DEPRECATION")
+            val list = Geocoder(this, Locale.getDefault()).getFromLocation(loc.latitude, loc.longitude, 1)
+            val a = list?.firstOrNull()
+            a?.locality ?: a?.subAdminArea ?: a?.adminArea ?: "your area"
+        } catch (e: Exception) {
+            "your area"
+        }
+    }
+
+    private fun locationText(): String {
+        val loc = currentLocation()
+            ?: return "I cannot get your location. Allow location permission, and open Maps once so the phone has a fix."
+        return "You are in " + placeName(loc) + "."
+    }
+
+    private fun weather(): String {
+        val loc = currentLocation()
+            ?: return "I cannot get your location. Allow location permission, and open Maps once so the phone has a fix."
+        val url = "https://api.open-meteo.com/v1/forecast?latitude=" + loc.latitude +
+            "&longitude=" + loc.longitude + "&current=temperature_2m,weather_code&timezone=auto"
+        val c = URL(url).openConnection() as HttpURLConnection
+        c.connectTimeout = 15000
+        c.readTimeout = 15000
+        val txt = c.inputStream.bufferedReader().use { it.readText() }
+        val cur = JSONObject(txt).getJSONObject("current")
+        val t = Math.round(cur.getDouble("temperature_2m"))
+        val code = cur.optInt("weather_code", 0)
+        val sky = when {
+            code == 0 -> "clear"
+            code in 1..3 -> "partly cloudy"
+            code == 45 || code == 48 -> "foggy"
+            code in 51..67 -> "rainy"
+            code in 71..77 -> "snowy"
+            code in 80..82 -> "showery"
+            code >= 95 -> "stormy"
+            else -> "mixed"
+        }
+        return "It is $t degrees Celsius and $sky in " + placeName(loc) + "."
     }
 }
