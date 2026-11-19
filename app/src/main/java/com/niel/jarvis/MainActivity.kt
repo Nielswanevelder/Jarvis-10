@@ -1,4 +1,3 @@
-
 package com.niel.jarvis
 
 import android.Manifest
@@ -16,6 +15,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.ContactsContract
+import android.provider.Settings
 import android.speech.RecognizerIntent
 import android.speech.tts.TextToSpeech
 import android.telephony.SmsManager
@@ -107,6 +107,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 Manifest.permission.SEND_SMS
             ), 2
         )
+        askNotificationAccess()
         addMsg("Good day. How may I help?", false)
     }
 
@@ -119,6 +120,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         if (pick != null) tts.voice = pick
         tts.setPitch(0.8f)
         tts.setSpeechRate(0.95f)
+        ui.postDelayed({ readNotifications() }, 800)
     }
 
     override fun onDestroy() {
@@ -272,6 +274,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         a.put(tool("open_app", "Open an installed app on this phone by its name, for example Spotify.", "app"))
         a.put(tool("call_contact", "Call a person from the phone contacts by name, or a phone number.", "name"))
         a.put(tool("send_text", "Send an SMS text message to a contact by name, or a phone number.", "name", "message"))
+        a.put(tool("read_notifications", "Read out the notifications currently on the phone."))
         a.put(tool("whatsapp_message", "Open a WhatsApp chat with a contact and prepare a message. The user taps send.", "name", "message"))
         return a
     }
@@ -328,6 +331,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             "open_app" -> openApp(args.optString("app", ""))
             "call_contact" -> callContact(args.optString("name", ""))
             "send_text" -> sendText(args.optString("name", ""), args.optString("message", ""))
+            "read_notifications" -> notificationSummary().ifEmpty { "Notification access is off. Turn it on in settings." }
             "whatsapp_message" -> whatsappMessage(args.optString("name", ""), args.optString("message", ""))
             else -> "Unknown tool."
         }
@@ -408,5 +412,50 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             startActivity(i)
         }
         return "WhatsApp is ready for $name. Tap send."
+    }
+
+    private fun listenerEnabled(): Boolean {
+        val flat = Settings.Secure.getString(contentResolver, "enabled_notification_listeners") ?: return false
+        return flat.contains(packageName)
+    }
+
+    private fun askNotificationAccess() {
+        if (listenerEnabled() || prefs.getBoolean("asked_notif", false)) return
+        prefs.edit().putBoolean("asked_notif", true).apply()
+        AlertDialog.Builder(this)
+            .setTitle("Notification access")
+            .setMessage("Jarvis needs notification access to read your notifications aloud when it opens.")
+            .setPositiveButton("Open settings") { _, _ ->
+                startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+            }
+            .setNegativeButton("Not now", null)
+            .show()
+    }
+
+    private fun notificationSummary(): String {
+        val svc = NotifService.instance ?: return ""
+        val list = svc.activeNotifications.filter { !it.isOngoing && it.packageName != packageName }
+        if (list.isEmpty()) return "You have no new notifications."
+        val pm = packageManager
+        val sb = StringBuilder("You have ${list.size} notifications. ")
+        for (n in list.take(8)) {
+            val ex = n.notification.extras
+            val app = try {
+                pm.getApplicationLabel(pm.getApplicationInfo(n.packageName, 0)).toString()
+            } catch (e: Exception) {
+                n.packageName
+            }
+            val title = ex.getCharSequence("android.title")?.toString() ?: ""
+            val text = (ex.getCharSequence("android.text")?.toString() ?: "").take(100)
+            sb.append("$app. $title. $text. ")
+        }
+        return sb.toString()
+    }
+
+    private fun readNotifications() {
+        val t = notificationSummary()
+        if (t.isEmpty()) return
+        addMsg(t, false)
+        speak(t)
     }
 }
